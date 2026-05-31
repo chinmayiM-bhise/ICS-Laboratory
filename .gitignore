@@ -1,0 +1,16 @@
+# Compiled binaries
+*.bin
+*.elf
+*.hex
+
+# Libraries and build artifacts
+libraries/
+build/
+.arduino/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
