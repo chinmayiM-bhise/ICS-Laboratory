@@ -1,8 +1,8 @@
-# IoT Security Demonstration: Mini Power Plant SCADA System
+# ICS Laboratory: IoT Security & SCADA Vulnerability Demo
 
 ## Project Overview
 
-This project is a deliberately vulnerable Mini Power Plant SCADA (Supervisory Control and Data Acquisition) system designed to demonstrate critical security flaws common in Industrial Internet of Things (IIoT) and Operational Technology (OT) environments. 
+This repository ([ICS-Laboratory](https://github.com/chinmayiM-bhise/ICS-Laboratory)) hosts a deliberately vulnerable Mini Power Plant SCADA (Supervisory Control and Data Acquisition) system designed to demonstrate critical security flaws common in Industrial Internet of Things (IIoT) and Operational Technology (OT) environments. 
 
 Built using ESP8266 microcontrollers, the system simulates a real-world scenario with an HMI (Human-Machine Interface) master node and a PLC (Programmable Logic Controller) slave node managing physical sensors and actuators (simulated motors/relays).
 
