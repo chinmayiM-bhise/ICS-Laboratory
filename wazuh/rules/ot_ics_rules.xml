@@ -1,0 +1,97 @@
+<!--
+  =============================================================================================
+  WAZUH CUSTOM RULES: OT / ICS Power Plant Anomaly Detection & Threat Hunting
+  AUTHOR: Chinmayi Bhise
+  TARGET PATH: /var/ossec/etc/rules/ot_ics_rules.xml
+  MAPPING: MITRE ATT&CK for ICS (ISA/IEC 62443 / NIST SP 800-82 Alignment)
+  =============================================================================================
+-->
+
+<group name="ot_ics,scada,power_plant,">
+
+  <!-- Base Catch-all Rule for OT Sensor Telemetry -->
+  <rule id="100200" level="3">
+    <decoded_as>ot-ics-sensor</decoded_as>
+    <field name="agent">^OT_SOC_SENSOR</field>
+    <description>OT-ICS: Normalized Industrial Sensor Telemetry Received</description>
+  </rule>
+
+  <!-- RULE 100201: Safety Interlock Violation (TRITON / TRISIS Incident) -->
+  <rule id="100201" level="12">
+    <if_sid>100200</if_sid>
+    <field name="rule_id">^100201$</field>
+    <mitre>
+      <id>T0888</id>
+    </mitre>
+    <description>CRITICAL HAZARD: Physical Safety Interlock Breached - Actuator Active While Optical Safety Barrier Tripped (T0888)</description>
+    <info type="cve">NIST SP 800-82</info>
+    <info type="link">https://attack.mitre.org/techniques/T0888/</info>
+  </rule>
+
+  <!-- RULE 100202: Setpoint Parameter Tampering (Stuxnet / Oldsmar Water Plant) -->
+  <rule id="100202" level="13">
+    <if_sid>100200</if_sid>
+    <field name="rule_id">^100202$</field>
+    <mitre>
+      <id>T0836</id>
+    </mitre>
+    <description>CRITICAL OT EXPLOIT: Setpoint Parameter Tampered Beyond Physical Safety Envelope (T0836)</description>
+    <info type="link">https://attack.mitre.org/techniques/T0836/</info>
+  </rule>
+
+  <!-- RULE 100203: Out-of-Band Hardware Backdoor Exploitation -->
+  <rule id="100203" level="14">
+    <if_sid>100200</if_sid>
+    <field name="rule_id">^100203$</field>
+    <mitre>
+      <id>T0859</id>
+    </mitre>
+    <description>EMERGENCY: Direct-to-PLC Hardware Backdoor Triggered via UDP Port 8888 (T0859)</description>
+    <info type="link">https://attack.mitre.org/techniques/T0859/</info>
+  </rule>
+
+  <!-- RULE 100204: Unauthenticated Supervisory Control Command (Industroyer) -->
+  <rule id="100204" level="10">
+    <if_sid>100200</if_sid>
+    <field name="rule_id">^100204$</field>
+    <mitre>
+      <id>T0855</id>
+    </mitre>
+    <description>HIGH: Unauthorized Process Control Command Injected Over Unencrypted MQTT (T0855)</description>
+    <info type="link">https://attack.mitre.org/techniques/T0855/</info>
+  </rule>
+
+  <!-- RULE 100205: Telemetry Replay / Denial of View (Stuxnet Recon) -->
+  <rule id="100205" level="9">
+    <if_sid>100200</if_sid>
+    <field name="rule_id">^100205$</field>
+    <mitre>
+      <id>T0815</id>
+    </mitre>
+    <description>WARNING: Telemetry Replay or Flatline Anomaly Detected on Supervisory Channel (T0815)</description>
+    <info type="link">https://attack.mitre.org/techniques/T0815/</info>
+  </rule>
+
+  <!-- RULE 100206: Thermal Trip Failure -->
+  <rule id="100206" level="11">
+    <if_sid>100200</if_sid>
+    <field name="rule_id">^100206$</field>
+    <mitre>
+      <id>T0888</id>
+    </mitre>
+    <description>HIGH: Safety Control Ineffective - Temperature Exceeds Safety Threshold Without Cooling Actuation (T0888)</description>
+    <info type="link">https://attack.mitre.org/techniques/T0888/</info>
+  </rule>
+
+  <!-- RULE 100207: Actuator Flapping / Mechanical Cycling DoS (Aurora Attack) -->
+  <rule id="100207" level="12">
+    <if_sid>100200</if_sid>
+    <field name="rule_id">^100207$</field>
+    <mitre>
+      <id>T0814</id>
+    </mitre>
+    <description>CRITICAL: High-Frequency Actuator Flapping Detected - Risk of Relay Burnout and Mechanical Destruction (T0814)</description>
+    <info type="link">https://attack.mitre.org/techniques/T0814/</info>
+  </rule>
+
+</group>

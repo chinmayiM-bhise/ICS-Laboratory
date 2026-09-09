@@ -1,0 +1,22 @@
+<!--
+  =============================================================================================
+  WAZUH CUSTOM DECODER: OT / ICS Industrial Telemetry & Detection Gateway
+  AUTHOR: Chinmayi Bhise
+  TARGET PATH: /var/ossec/etc/decoders/ot_ics_decoders.xml
+  DESCRIPTION: Parses normalized JSON alert events emitted by the passive OT SOC Sensor.
+  =============================================================================================
+-->
+
+<!-- Master Decoder for OT ICS JSON Events -->
+<decoder name="ot-ics-sensor">
+  <prematch>^{\s*"timestamp":|"agent":\s*"OT_SOC_SENSOR</prematch>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>
+
+<!-- Child Decoder for Syslog Header Prefix (e.g. <14>{"timestamp":...}) -->
+<decoder name="ot-ics-syslog-json">
+  <prematch>^<\d+>\{\s*"timestamp":</prematch>
+  <regex offset="after_prematch">^<\d+>(\{.+\})$</regex>
+  <order>json_content</order>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>

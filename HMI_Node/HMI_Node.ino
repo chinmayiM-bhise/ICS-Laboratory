@@ -1,492 +1,434 @@
+/*
+ ==============================================================================================
+  PROJECT: ICS Laboratory - Mini Power Plant SCADA & OT Testbed
+  NODE: HMI Supervisory Controller & Web Gateway (Purdue Model Level 2)
+  COMMUNICATION PROTOCOL: MQTT v3.1.1 & HTTP Web SCADA Dashboard
+  
+  REAL-WORLD OT CONTEXT & VULNERABILITY MATRIX:
+  - T0855: Unauthenticated MQTT Command Publication (plant/commands)
+  - T0836: Setpoint Modification without validation (plant/config)
+  - T0887: Plaintext Telemetry Sniffing (plant/telemetry)
+  - T0802: Wildcard Topic Interception (#)
+  - T0812: Default Hardcoded Wi-Fi & Static Credentials
+ ==============================================================================================
+*/
+
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <PubSubClient.h>
 
-const char* ssid = "Mini_OT_SCADA";
+// --- Wi-Fi SoftAP Configuration (Level 2 Supervisory Network) ---
+const char* ssid     = "Mini_OT_SCADA";
 const char* password = "admin123";
 
+// --- MQTT Broker Configuration ---
+// By default, connects to MQTT broker running at 192.168.4.1 or custom gateway
+const char* mqtt_server = "192.168.4.1";
+const int   mqtt_port   = 1883;
+const char* mqtt_client = "HMI_SCADA_MASTER";
+
+// --- MQTT Topics ---
+const char* TOPIC_TELEMETRY = "plant/telemetry";
+const char* TOPIC_COMMANDS  = "plant/commands";
+const char* TOPIC_CONFIG    = "plant/config";
+const char* TOPIC_ALERTS    = "plant/alerts";
+
+// Network & Server Instances
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
 ESP8266WebServer server(80);
 
-// Global State
-float currentTemp = 72.0;
-float currentHum = 45.0;
-bool isMotorOn = true;
-bool isRelayOn = true;
-bool isAlarmOn = false;
-bool isIrDetected = false;
-float powerOutput = 1.25;
-float pressure = 3.5;
-float tempThreshold = 85.0;
+// --- Real-Time Plant State Cache (Updated via MQTT Telemetry) ---
+float currentTemp     = 24.0;
+float currentHum      = 50.0;
+bool  isMotorOn       = false;
+bool  isRelayOn       = false;
+bool  isAlarmOn       = false;
+bool  isIrDetected    = false;
+float powerOutput     = 0.8;
+float pressure        = 3.1;
+float tempThreshold   = 30.0;
+String plantName      = "MINI POWER PLANT - GENERATION UNIT 1";
 
-// --- VULNERABILITY GLOBALS ---
-String plantName = "MINI POWER PLANT"; // Used for Reflected XSS
-char firmwareVersion[16] = "1.1.0";    // Target for Buffer Overflow
-// -----------------------------
-
-// Simple Event Log (stores last 3 events)
-String eventLog[3] = {"SYSTEM STARTUP", "NORMAL OPERATION", "-"};
-int logIndex = 2;
+// Ring Buffer for Recent MQTT SCADA Logs
+String eventLog[5] = {
+  "[SYSTEM] HMI Master Gateway Online",
+  "[MQTT] Connected to Broker on Port 1883",
+  "[OT-NSM] Subscribed to plant/#",
+  "[STATUS] Telemetry Link Established",
+  "[STATUS] Normal Plant Operation"
+};
 
 void addLog(String event) {
-    eventLog[0] = eventLog[1];
-    eventLog[1] = eventLog[2];
-    eventLog[2] = event;
+  for (int i = 0; i < 4; i++) {
+    eventLog[i] = eventLog[i + 1];
+  }
+  eventLog[4] = event;
 }
 
+// -----------------------------------------------------------------------------
+// Helper: Simple JSON field extractor
+// -----------------------------------------------------------------------------
+float parseJsonFloat(String json, String key) {
+  int idx = json.indexOf("\"" + key + "\":");
+  if (idx == -1) idx = json.indexOf(key + ":");
+  if (idx == -1) return -999.0;
+  int colon = json.indexOf(':', idx);
+  int comma = json.indexOf(',', colon);
+  int brace = json.indexOf('}', colon);
+  int end   = (comma != -1 && comma < brace) ? comma : brace;
+  String val = json.substring(colon + 1, end);
+  val.trim();
+  val.replace("\"", "");
+  return val.toFloat();
+}
+
+int parseJsonInt(String json, String key) {
+  return (int)parseJsonFloat(json, key);
+}
+
+// -----------------------------------------------------------------------------
+// MQTT Inbound Message Callback
+// -----------------------------------------------------------------------------
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  payload[length] = '\0';
+  String msg = String((char*)payload);
+  String topicStr = String(topic);
+
+  Serial.printf("[HMI MQTT RECV] Topic: %s | Msg: %s\n", topic, msg.c_str());
+
+  if (topicStr == TOPIC_TELEMETRY) {
+    float t = parseJsonFloat(msg, "temp");
+    if (t != -999.0) currentTemp = t;
+    
+    float h = parseJsonFloat(msg, "hum");
+    if (h != -999.0) currentHum = h;
+
+    int m = parseJsonInt(msg, "motor");
+    if (m != -999) isMotorOn = (m == 1);
+
+    int r = parseJsonInt(msg, "relay");
+    if (r != -999) isRelayOn = (r == 1);
+
+    int a = parseJsonInt(msg, "alarm");
+    if (a != -999) isAlarmOn = (a == 1);
+
+    int ir = parseJsonInt(msg, "ir_obstacle");
+    if (ir != -999) isIrDetected = (ir == 1);
+
+    float p = parseJsonFloat(msg, "power");
+    if (p != -999.0) powerOutput = p;
+
+    float pres = parseJsonFloat(msg, "pressure");
+    if (pres != -999.0) pressure = pres;
+
+    float thresh = parseJsonFloat(msg, "threshold");
+    if (thresh != -999.0) tempThreshold = thresh;
+  }
+  else if (topicStr == TOPIC_ALERTS) {
+    addLog("[ALERT MQTT] " + msg);
+  }
+  else if (topicStr == TOPIC_COMMANDS) {
+    addLog("[CMD OVER MQTT] " + msg);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Maintain MQTT Connection
+// -----------------------------------------------------------------------------
+void reconnectMqtt() {
+  if (!mqttClient.connected()) {
+    if (mqttClient.connect(mqtt_client)) {
+      Serial.println("[HMI] Connected to MQTT Broker!");
+      mqttClient.subscribe("plant/#"); // Subscribe to all plant topics
+      addLog("[MQTT] Subscribed to wildcard 'plant/#'");
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Embedded SCADA Web Dashboard HTML (Purdue Model Level 2 HMI)
+// -----------------------------------------------------------------------------
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>MINI POWER PLANT CONTROL SYSTEM</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OT SCADA Dashboard - Mini Power Plant</title>
     <style>
         :root {
-            --bg-color: #050a10;
-            --panel-bg: rgba(20, 30, 48, 0.8);
-            --accent-blue: #00d2ff;
+            --bg-dark: #070d14;
+            --card-bg: #0f1926;
+            --border-color: #1e324d;
+            --accent-cyan: #00d2ff;
             --accent-green: #00ff88;
             --accent-red: #ff3344;
-            --text-main: #e0e6ed;
-            --border-glow: 0 0 10px rgba(0, 210, 255, 0.3);
+            --accent-amber: #ffaa00;
+            --text-main: #e2e8f0;
+            --text-muted: #889bb0;
         }
-
-        body {
-            background: radial-gradient(circle at center, #101b2d 0%, var(--bg-color) 100%);
-            color: var(--text-main);
-            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            margin: 0;
-            padding: 10px;
-            overflow-x: hidden;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-
-        /* Login Overlay */
-        #login-overlay {
-            position: fixed;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(5, 10, 16, 0.95);
-            z-index: 9999;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            backdrop-filter: blur(10px);
-        }
-        .login-box {
-            background: var(--panel-bg);
-            border: 1px solid var(--accent-blue);
-            padding: 30px;
-            border-radius: 5px;
-            box-shadow: 0 0 20px rgba(0, 210, 255, 0.4);
-            text-align: center;
-            width: 300px;
-        }
-        .login-input {
-            width: 90%;
-            padding: 10px;
-            margin: 10px 0;
-            background: #111;
-            border: 1px solid #334;
-            color: white;
-        }
-
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', -apple-system, sans-serif; }
+        body { background: var(--bg-dark); color: var(--text-main); padding: 15px; }
+        
         .header {
-            text-align: center;
-            padding: 15px;
-            border-bottom: 2px solid var(--accent-blue);
-            box-shadow: 0 5px 15px rgba(0, 210, 255, 0.2);
-            margin-bottom: 20px;
+            display: flex; justify-content: space-between; align-items: center;
+            background: var(--card-bg); border: 1px solid var(--border-color);
+            padding: 15px 25px; border-radius: 8px; margin-bottom: 20px;
+            box-shadow: 0 4px 15px rgba(0,210,255,0.08);
+        }
+        .header h1 { font-size: 1.4rem; color: var(--accent-cyan); letter-spacing: 1px; }
+        .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 4px; font-weight: bold; }
+        .badge-mqtt { background: rgba(0,210,255,0.15); color: var(--accent-cyan); border: 1px solid var(--accent-cyan); }
+        .badge-live { background: rgba(0,255,136,0.15); color: var(--accent-green); border: 1px solid var(--accent-green); }
+        
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 15px; margin-bottom: 20px; }
+        .card {
+            background: var(--card-bg); border: 1px solid var(--border-color);
+            border-radius: 8px; padding: 18px; text-align: center;
+            transition: transform 0.2s, border-color 0.2s;
+        }
+        .card:hover { border-color: var(--accent-cyan); }
+        .card-label { font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 8px; }
+        .card-val { font-size: 1.8rem; font-weight: bold; color: #fff; }
+        .status-pill { display: inline-block; padding: 4px 14px; border-radius: 20px; font-weight: bold; font-size: 0.85rem; margin-top: 5px; }
+        .status-on { background: rgba(0,255,136,0.2); color: var(--accent-green); border: 1px solid var(--accent-green); }
+        .status-off { background: rgba(255,51,68,0.2); color: var(--accent-red); border: 1px solid var(--accent-red); }
+        .status-warn { background: rgba(255,170,0,0.2); color: var(--accent-amber); border: 1px solid var(--accent-amber); }
+
+        .control-panel {
+            background: var(--card-bg); border: 1px solid var(--border-color);
+            border-radius: 8px; padding: 20px; margin-bottom: 20px;
+        }
+        .control-panel h2 { font-size: 1.1rem; color: var(--accent-cyan); margin-bottom: 15px; }
+        .btn-group { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px; }
+        button {
+            cursor: pointer; border: none; padding: 10px 18px; border-radius: 5px;
+            font-weight: bold; font-size: 0.85rem; text-transform: uppercase;
+            transition: opacity 0.2s, transform 0.1s;
+        }
+        button:active { transform: scale(0.97); }
+        .btn-start { background: var(--accent-green); color: #05140b; }
+        .btn-stop { background: #4a5568; color: #fff; }
+        .btn-estop { background: var(--accent-red); color: #fff; }
+        .btn-update { background: var(--accent-cyan); color: #041724; }
+
+        .threshold-box { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+        input[type="number"] {
+            background: #050a10; border: 1px solid var(--border-color);
+            color: #fff; padding: 8px 12px; border-radius: 4px; width: 140px;
         }
 
-        .header h1 {
-            margin: 0;
-            font-size: 24px;
-            background: linear-gradient(to right, #fff, var(--accent-blue));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+        .log-section {
+            background: #050a10; border: 1px solid var(--border-color);
+            border-radius: 8px; padding: 15px; font-family: 'Courier New', monospace;
+            font-size: 0.82rem; height: 160px; overflow-y: auto;
         }
-
-        .main-container {
-            display: grid;
-            grid-template-columns: 280px 1fr 300px;
-            gap: 20px;
-            max-width: 1400px;
-            margin: 0 auto;
-        }
-
-        .panel {
-            background: var(--panel-bg);
-            border: 1px solid rgba(0, 210, 255, 0.2);
-            border-radius: 5px;
-            padding: 15px;
-            box-shadow: var(--border-glow);
-            backdrop-filter: blur(5px);
-        }
-
-        .panel-header {
-            color: var(--accent-blue);
-            font-size: 14px;
-            font-weight: bold;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
-            padding-bottom: 5px;
-            margin-bottom: 15px;
-            display: flex;
-            justify-content: space-between;
-        }
-
-        .status-item {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 15px;
-            padding: 10px;
-            background: rgba(0,0,0,0.2);
-            border-radius: 3px;
-        }
-
-        .status-label { font-size: 12px; color: #8899aa; }
-        .status-value { font-size: 18px; font-weight: bold; }
-        .val-blue { color: var(--accent-blue); }
-        .val-green { color: var(--accent-green); }
-        .val-red { color: var(--accent-red); }
-
-        .schematic-box {
-            position: relative;
-            height: 400px;
-            background: url('https://www.transparenttextures.com/patterns/carbon-fibre.png'), rgba(0,0,0,0.4);
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            border: 1px dashed rgba(0, 210, 255, 0.3);
-        }
-
-        .system-diagram {
-            width: 80%;
-            height: 60%;
-            border: 2px solid rgba(0, 210, 255, 0.2);
-            position: relative;
-            display: flex;
-            justify-content: space-around;
-            align-items: center;
-        }
-
-        .pipe {
-            position: absolute;
-            background: linear-gradient(90deg, transparent, var(--accent-blue), transparent);
-            height: 4px;
-            width: 100%;
-            opacity: 0.5;
-            animation: flow 2s linear infinite;
-        }
-
-        @keyframes flow { from { background-position: -200px; } to { background-position: 200px; } }
-
-        .btn {
-            width: 100%;
-            padding: 12px;
-            margin-bottom: 10px;
-            border: none;
-            border-radius: 3px;
-            color: white;
-            font-weight: bold;
-            cursor: pointer;
-            text-transform: uppercase;
-            transition: 0.3s;
-        }
-
-        .btn-blue { background: linear-gradient(to bottom, #0088cc, #005588); border-bottom: 4px solid #003355; }
-        .btn-emergency { background: linear-gradient(to bottom, #ff4455, #aa1122); border-bottom: 4px solid #770011; }
-        .btn-override { background: linear-gradient(to bottom, #225588, #113366); border-bottom: 4px solid #081a33; }
-
-        .input-group {
-            display: flex;
-            justify-content: space-between;
-            margin-top: 10px;
-            background: rgba(0,0,0,0.3);
-            padding: 5px;
-            border: 1px solid #334;
-        }
-        .input-group input { width: 60px; background: transparent; border: none; color: white; text-align: right; }
-        .input-group button { background: var(--accent-blue); border: none; padding: 5px 10px; color: black; cursor: pointer; font-weight: bold;}
-
-        .bottom-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 15px;
-            margin-top: 20px;
-            max-width: 1400px;
-            margin-left: auto;
-            margin-right: auto;
-        }
-
-        .log-entry { font-size: 10px; color: #aaa; margin-bottom: 4px; border-bottom: 1px solid #222; padding-bottom: 2px;}
-
-        .blink { animation: blinker 1.5s linear infinite; }
-        @keyframes blinker { 50% { opacity: 0.2; } }
+        .log-line { padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); color: var(--accent-cyan); }
     </style>
 </head>
 <body>
-    <!-- VULNERABILITY 1: Hardcoded Client-Side Login -->
-    <div id="login-overlay">
-        <div class="login-box">
-            <h2 style="color: var(--accent-blue); margin-top: 0;">SCADA AUTHENTICATION</h2>
-            <input type="text" id="user" class="login-input" placeholder="USERNAME" value="admin">
-            <input type="password" id="pass" class="login-input" placeholder="PASSWORD">
-            <button class="btn btn-blue" onclick="checkLogin()" style="margin-top: 15px;">LOGIN</button>
-            <div id="login-error" style="color: var(--accent-red); font-size: 12px; margin-top: 10px; display: none;">ACCESS DENIED</div>
-        </div>
-    </div>
-
     <div class="header">
-        <h1><span id="pName"></span> <span style="color:rgba(255,255,255,0.5)">CONTROL SYSTEM</span></h1>
-    </div>
-
-    <div class="main-container">
-        <!-- Left Panel: Live Status -->
-        <div class="panel">
-            <div class="panel-header"><span>LIVE STATUS</span> [OK]</div>
-            
-            <div class="status-item">
-                <span class="status-label">BOILER TEMP:</span>
-                <span class="status-value val-blue" id="temp">-- &deg;C</span>
-            </div>
-            <div class="status-item">
-                <span class="status-label">HUMIDITY:</span>
-                <span class="status-value val-blue" id="hum">-- %</span>
-            </div>
-            <div class="status-item">
-                <span class="status-label">TURBINE MOTOR:</span>
-                <span class="status-value" id="motor">--</span>
-            </div>
-            <div class="status-item">
-                <span class="status-label">SAFETY RELAY:</span>
-                <span class="status-value" id="relay">--</span>
-            </div>
-            <div class="status-item">
-                <span class="status-label">IR SENSOR:</span>
-                <span class="status-value" id="ir">--</span>
-            </div>
+        <div>
+            <h1>MINI POWER PLANT // SCADA HMI</h1>
+            <p style="font-size:0.8rem; color:var(--text-muted); margin-top:3px;">Purdue Model Level 2 Supervisory Station</p>
         </div>
-
-        <!-- Middle Panel: Schematic -->
-        <div class="panel">
-            <div class="panel-header">SYSTEM SCHEMATIC</div>
-            <div class="schematic-box">
-                <div style="font-size:10px; color:var(--accent-blue); margin-bottom: 10px;">VIRTUAL REPRESENTATION</div>
-                <div class="system-diagram">
-                    <div style="border:1px solid #445566; padding: 10px; box-shadow: 0 0 10px #ff5500;">BOILER</div>
-                    <div class="pipe"></div>
-                    <div style="border:1px solid #445566; padding: 10px;">TURBINE</div>
-                    <div style="border:1px solid #445566; padding: 10px;">GENERATOR</div>
-                </div>
-                <div style="margin-top: 20px; color: var(--accent-green); font-size: 12px;" class="blink">SYSTEM FLOW ACTIVE</div>
-            </div>
-        </div>
-
-        <!-- Right Panel: Alerts & Controls -->
-        <div class="panel">
-            <div class="panel-header">ALERTS & CONTROLS</div>
-            
-            <div id="alarm-banner" style="background: rgba(255, 51, 68, 0.2); padding: 10px; border: 1px solid var(--accent-red); margin-bottom: 15px; font-size: 11px; text-align: center; display: none;">
-                <span class="val-red blink">WARNING: HIGH TEMPERATURE DETECTED</span>
-            </div>
-
-            <button class="btn btn-emergency" onclick="sendCommand('emergency', 1)">EMERGENCY SHUTDOWN</button>
-            
-            <div style="display: flex; gap: 10px;">
-                <button class="btn btn-override" onclick="sendCommand('motor', 1)">START MOTOR</button>
-                <button class="btn btn-override" onclick="sendCommand('motor', 0)">STOP MOTOR</button>
-            </div>
-
-            <!-- VULNERABILITY 4: Unsafe Configuration -->
-            <div style="margin-top: 20px; border-top: 1px solid #334; padding-top: 15px;">
-                <span class="status-label">SAFETY THRESHOLD (&deg;C)</span>
-                <div class="input-group">
-                    <input type="number" id="threshInput" value="85">
-                    <button onclick="setThreshold()">UPDATE</button>
-                </div>
-                <div style="font-size: 10px; color: #667; margin-top: 5px;">CURRENT: <span id="curThresh">--</span>&deg;C</div>
-            </div>
+        <div style="display:flex; gap:10px;">
+            <span class="badge badge-mqtt">MQTT: TCP 1883</span>
+            <span class="badge badge-live" id="connStatus">LIVE TELEMETRY</span>
         </div>
     </div>
 
-    <!-- Bottom Panel mapping to Sample.png features -->
-    <div class="bottom-grid">
-        <div class="panel">
-            <div class="panel-header">NETWORK STATUS</div>
-            <div style="font-size: 12px; margin-bottom: 8px;"><span class="val-green">&check;</span> PLC CONNECTED</div>
-            <div style="font-size: 12px;"><span class="val-green">&check;</span> SCADA ONLINE</div>
+    <div class="grid">
+        <div class="card">
+            <div class="card-label">Core Temperature</div>
+            <div class="card-val" id="dispTemp">-- °C</div>
         </div>
-        
-        <!-- VULNERABILITY 6: Inadequate Logging -->
-        <div class="panel">
-            <div class="panel-header">DATA LOGS</div>
-            <div id="logsContainer">
-                <!-- Logs injected here -->
-            </div>
+        <div class="card">
+            <div class="card-label">Humidity</div>
+            <div class="card-val" id="dispHum">-- %</div>
         </div>
+        <div class="card">
+            <div class="card-label">Generator Motor</div>
+            <div id="dispMotor"><span class="status-pill status-off">OFF</span></div>
+        </div>
+        <div class="card">
+            <div class="card-label">IR Safety Interlock</div>
+            <div id="dispIr"><span class="status-pill status-on">CLEAR</span></div>
+        </div>
+        <div class="card">
+            <div class="card-label">Active Power Output</div>
+            <div class="card-val" id="dispPower">-- kW</div>
+        </div>
+        <div class="card">
+            <div class="card-label">System Pressure</div>
+            <div class="card-val" id="dispPressure">-- Bar</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Safety Thermal Trip Limit</div>
+            <div class="card-val" id="dispThresh">-- °C</div>
+        </div>
+    </div>
 
-        <div class="panel">
-            <div class="panel-header">POWER OUTPUT</div>
-            <div class="status-value val-blue"><span id="pwr">1.25</span> MW</div>
+    <div class="control-panel">
+        <h2>Supervisory Actuation & Setpoint Control</h2>
+        <div class="btn-group">
+            <button class="btn-start" onclick="sendMqttCmd('motor', 1)">Start Motor (Override)</button>
+            <button class="btn-stop" onclick="sendMqttCmd('motor', 0)">Stop Motor</button>
+            <button class="btn-estop" onclick="sendMqttCmd('emergency', 1)">EMERGENCY STOP (E-STOP)</button>
         </div>
+        <div class="threshold-box">
+            <label style="font-size:0.85rem; color:var(--text-muted);">Set Safety Trip Threshold (°C):</label>
+            <input type="number" id="inputThresh" value="30" step="0.5">
+            <button class="btn-update" onclick="updateThreshold()">Apply Setpoint</button>
+        </div>
+    </div>
 
-        <div class="panel">
-            <div class="panel-header">SECURE CONNECTION</div>
-            <div style="font-size: 12px; margin-bottom: 8px;"><span class="val-red">&cross;</span> ENCRYPTION DISABLED</div>
-            <div style="font-size: 12px;"><span class="val-red">&cross;</span> PLAIN HTTP TRAFFIC</div>
+    <div class="control-panel" style="margin-bottom:0;">
+        <h2>Supervisory MQTT Telemetry & Alarm Stream</h2>
+        <div class="log-section" id="logContainer">
+            <div class="log-line">> [Awaiting MQTT Telemetry Stream...]</div>
         </div>
     </div>
 
     <script>
-        // Highly insecure hardcoded login check
-        function checkLogin() {
-            if(document.getElementById('user').value === 'admin' && document.getElementById('pass').value === 'admin123') {
-                document.getElementById('login-overlay').style.display = 'none';
-            } else {
-                document.getElementById('login-error').style.display = 'block';
-            }
-        }
-
-        setInterval(function() {
-            fetch('/data')
-                .then(response => response.json())
+        function updateUI() {
+            fetch('/api/telemetry')
+                .then(res => res.json())
                 .then(data => {
-                    // Reflected XSS Vulnerability: Using innerHTML for plant name
-                    document.getElementById('pName').innerHTML = data.plantName;
-                    
-                    document.getElementById('temp').innerText = data.temperature.toFixed(1) + ' °C';
-                    document.getElementById('hum').innerText = data.humidity.toFixed(1) + ' %';
-                    
-                    const motor = document.getElementById('motor');
-                    motor.innerText = data.motor ? 'RUNNING' : 'STOPPED';
-                    motor.className = data.motor ? 'status-value val-green' : 'status-value val-red';
-                    
-                    const relay = document.getElementById('relay');
-                    relay.innerText = data.relay ? 'ACTIVE' : 'INACTIVE';
-                    relay.className = data.relay ? 'status-value val-green' : 'status-value val-red';
+                    document.getElementById('dispTemp').innerText = data.temp.toFixed(1) + ' °C';
+                    document.getElementById('dispHum').innerText = data.hum.toFixed(1) + ' %';
+                    document.getElementById('dispPower').innerText = data.power.toFixed(2) + ' kW';
+                    document.getElementById('dispPressure').innerText = data.pressure.toFixed(2) + ' Bar';
+                    document.getElementById('dispThresh').innerText = data.threshold.toFixed(1) + ' °C';
 
-                    const ir = document.getElementById('ir');
-                    ir.innerText = data.ir ? 'DETECTED' : 'CLEAR';
-                    ir.className = data.ir ? 'status-value val-red blink' : 'status-value val-green';
+                    let motorEl = document.getElementById('dispMotor');
+                    motorEl.innerHTML = data.motor ? 
+                        '<span class="status-pill status-on">RUNNING</span>' : 
+                        '<span class="status-pill status-off">STOPPED</span>';
 
-                    document.getElementById('alarm-banner').style.display = data.alarm ? 'block' : 'none';
-                    document.getElementById('curThresh').innerText = data.threshold.toFixed(1);
+                    let irEl = document.getElementById('dispIr');
+                    irEl.innerHTML = data.ir_obstacle ? 
+                        '<span class="status-pill status-warn">TRIPPED (OBSTACLE)</span>' : 
+                        '<span class="status-pill status-on">CLEAR</span>';
 
-                    // Update Logs
                     let logHtml = '';
-                    data.logs.forEach(log => {
-                        logHtml += `<div class="log-entry">> ${log}</div>`;
-                    });
-                    document.getElementById('logsContainer').innerHTML = logHtml;
+                    data.logs.forEach(l => { logHtml += `<div class="log-line">> ${l}</div>`; });
+                    document.getElementById('logContainer').innerHTML = logHtml;
+                })
+                .catch(err => {
+                    document.getElementById('connStatus').innerText = 'OFFLINE';
+                    document.getElementById('connStatus').style.borderColor = 'red';
                 });
-        }, 1000);
-
-        function sendCommand(cmd, val) {
-            fetch('/command?' + cmd + '=' + val);
         }
 
-        function setThreshold() {
-            let val = document.getElementById('threshInput').value;
-            fetch('/command?thresh=' + val);
+        setInterval(updateUI, 1500);
+
+        function sendMqttCmd(key, val) {
+            fetch(`/api/command?${key}=${val}`)
+                .then(r => updateUI());
+        }
+
+        function updateThreshold() {
+            let val = document.getElementById('inputThresh').value;
+            fetch(`/api/config?threshold=${val}`)
+                .then(r => updateUI());
         }
     </script>
 </body>
 </html>
 )rawliteral";
 
-void handleRoot() { server.send(200, "text/html", index_html); }
-
-void handleData() {
-    String json = "{";
-    json += "\"plantName\":\"" + plantName + "\",";
-    json += "\"version\":\"" + String(firmwareVersion) + "\",";
-    json += "\"temperature\":" + String(currentTemp) + ",";
-    json += "\"humidity\":" + String(currentHum) + ",";
-    json += "\"motor\":" + String(isMotorOn ? "true" : "false") + ",";
-    json += "\"relay\":" + String(isRelayOn ? "true" : "false") + ",";
-    json += "\"alarm\":" + String(isAlarmOn ? "true" : "false") + ",";
-    json += "\"ir\":" + String(isIrDetected ? "true" : "false") + ",";
-    json += "\"power\":" + String(powerOutput) + ",";
-    json += "\"pressure\":" + String(pressure) + ",";
-    json += "\"threshold\":" + String(tempThreshold) + ",";
-    
-    // Send logs
-    json += "\"logs\":[\"" + eventLog[0] + "\",\"" + eventLog[1] + "\",\"" + eventLog[2] + "\"]";
-    json += "}";
-    server.send(200, "application/json", json);
+// -----------------------------------------------------------------------------
+// Web API Handlers (Bridge Web SCADA to MQTT Topics)
+// -----------------------------------------------------------------------------
+void handleRoot() {
+  server.send(200, "text/html", index_html);
 }
 
-void handleCommand() {
-    if (server.hasArg("motor")) {
-        isMotorOn = (server.arg("motor") == "1");
-        addLog(isMotorOn ? "CMD: MOTOR STARTED" : "CMD: MOTOR STOPPED");
-    }
-    if (server.hasArg("emergency")) {
-        isMotorOn = false;
-        isRelayOn = false;
-        isAlarmOn = true;
-        addLog("CMD: EMERGENCY SHUTDOWN!");
-    }
-    if (server.hasArg("thresh")) {
-        tempThreshold = server.arg("thresh").toFloat();
-        addLog("CMD: THRESHOLD SET TO " + String(tempThreshold));
-    }
-    // VULNERABILITY: Reflected XSS via /command?set_name=
-    if (server.hasArg("set_name")) {
-        plantName = server.arg("set_name");
-        addLog("SYSTEM: PLANT NAME UPDATED");
-    }
-    server.send(200, "text/plain", "OK");
+void handleTelemetryApi() {
+  String json = "{";
+  json += "\"temp\":" + String(currentTemp, 1) + ",";
+  json += "\"hum\":" + String(currentHum, 1) + ",";
+  json += "\"motor\":" + String(isMotorOn ? "true" : "false") + ",";
+  json += "\"relay\":" + String(isRelayOn ? "true" : "false") + ",";
+  json += "\"alarm\":" + String(isAlarmOn ? "true" : "false") + ",";
+  json += "\"ir_obstacle\":" + String(isIrDetected ? "true" : "false") + ",";
+  json += "\"power\":" + String(powerOutput, 2) + ",";
+  json += "\"pressure\":" + String(pressure, 2) + ",";
+  json += "\"threshold\":" + String(tempThreshold, 1) + ",";
+  json += "\"logs\":[";
+  for (int i = 0; i < 5; i++) {
+    json += "\"" + eventLog[i] + "\"";
+    if (i < 4) json += ",";
+  }
+  json += "]}";
+
+  server.send(200, "application/json", json);
 }
 
-// VULNERABILITY: Buffer Overflow (DoS) via unsafe strcpy
-void handleFirmwareCheck() {
-    char versionBuffer[16];
-    if (server.hasArg("version")) {
-        // Unsafe copy! Sending >16 chars will crash the ESP
-        strcpy(versionBuffer, server.arg("version").c_str());
-        server.send(200, "text/plain", "Firmware version recorded: " + String(versionBuffer));
-    } else {
-        server.send(400, "text/plain", "Missing version param");
-    }
+void handleCommandApi() {
+  if (server.hasArg("motor")) {
+    int m = server.arg("motor").toInt();
+    String payload = "{\"motor\":" + String(m) + "}";
+    mqttClient.publish(TOPIC_COMMANDS, payload.c_str());
+    addLog("[HMI PUBLISH] plant/commands -> " + payload);
+  }
+  if (server.hasArg("emergency")) {
+    String payload = "{\"emergency\":1}";
+    mqttClient.publish(TOPIC_COMMANDS, payload.c_str());
+    addLog("[HMI PUBLISH CRITICAL] plant/commands -> " + payload);
+  }
+  server.send(200, "text/plain", "OK");
 }
 
-// VULNERABILITY: Path Traversal / Info Disclosure
-void handleDownloadLog() {
-    if (server.hasArg("file")) {
-        String fileName = server.arg("file");
-        if (fileName == "../../config.sys") {
-            String secret = "WiFi_SSID: " + String(ssid) + "\nWiFi_PASS: " + String(password);
-            server.send(200, "text/plain", secret);
-        } else {
-            server.send(404, "text/plain", "Log file not found");
-        }
-    }
+void handleConfigApi() {
+  if (server.hasArg("threshold")) {
+    float t = server.arg("threshold").toFloat();
+    tempThreshold = t;
+    String payload = "{\"threshold\":" + String(t, 1) + "}";
+    mqttClient.publish(TOPIC_CONFIG, payload.c_str());
+    addLog("[HMI PUBLISH] plant/config -> " + payload);
+  }
+  server.send(200, "text/plain", "OK");
 }
 
-void handleUpdate() {
-    if (server.hasArg("t")) currentTemp = server.arg("t").toFloat();
-    if (server.hasArg("h")) currentHum = server.arg("h").toFloat();
-    if (server.hasArg("m")) isMotorOn = (server.arg("m") == "1");
-    if (server.hasArg("r")) isRelayOn = (server.arg("r") == "1");
-    if (server.hasArg("a")) isAlarmOn = (server.arg("a") == "1");
-    if (server.hasArg("i")) isIrDetected = (server.arg("i") == "1");
-    server.send(200, "text/plain", "OK");
-}
-
+// -----------------------------------------------------------------------------
+// Setup Routine
+// -----------------------------------------------------------------------------
 void setup() {
-    Serial.begin(115200);
-    WiFi.softAP(ssid, password);
-    server.on("/", handleRoot);
-    server.on("/data", handleData);
-    server.on("/update", handleUpdate);
-    server.on("/command", handleCommand);
-    server.on("/firmware_check", handleFirmwareCheck);
-    server.on("/download_log", handleDownloadLog);
-    server.begin();
-    Serial.println("SCADA Dashboard Online");
+  Serial.begin(115200);
+  Serial.println("\n========================================================");
+  Serial.println("   ICS LABORATORY - HMI SUPERVISORY NODE (LEVEL 2)       ");
+  Serial.println("   PROTOCOL: MQTT v3.1.1 (TCP 1883) & SCADA Web HMI     ");
+  Serial.println("========================================================");
+
+  // Configure Wi-Fi Access Point for the SCADA Subnet
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid, password);
+  Serial.printf("[AP] SCADA Network Started: SSID='%s' | Gateway IP: %s\n", 
+                ssid, WiFi.softAPIP().toString().c_str());
+
+  // Configure MQTT Client
+  mqttClient.setServer(mqtt_server, mqtt_port);
+  mqttClient.setCallback(mqttCallback);
+
+  // Setup Web Server Endpoints
+  server.on("/", handleRoot);
+  server.on("/api/telemetry", handleTelemetryApi);
+  server.on("/api/command", handleCommandApi);
+  server.on("/api/config", handleConfigApi);
+  server.begin();
+  Serial.println("[HTTP] SCADA Web Dashboard listening on port 80");
 }
 
-void loop() { server.handleClient(); }
+// -----------------------------------------------------------------------------
+// Main Execution Loop
+// -----------------------------------------------------------------------------
+void loop() {
+  if (!mqttClient.connected()) {
+    reconnectMqtt();
+  }
+  mqttClient.loop();
+  server.handleClient();
+}
