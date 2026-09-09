@@ -20,11 +20,11 @@
 ```mermaid
 graph TD
     subgraph L0_L1["Level 0 / 1: Physical Process & Field Control (Hardware Testbed)"]
-        Sensors["Sensors & Safety Barriers<br/>• DHT11 (Temp / Humidity)<br/>• HW-201 IR Optical Interlock"]
-        Actuators["Physical Actuators<br/>• 5V Relay Module<br/>• DC Turbine / Generator Motor"]
-        PLC["PLC Field Node (ESP8266)<br/>• Modbus/TCP Server (TCP Port 502)<br/>• PubSubClient MQTT v3.1.1 (TCP Port 1883)<br/>• Shadow UDP Listener (Port 8888)"]
-        Sensors -->|GPIO Inputs| PLC
-        PLC -->|GPIO Relays| Actuators
+        Sensors["Sensors & Safety Barriers<br/>• DHT11 Temp and Humidity<br/>• HW-201 IR Optical Interlock"]
+        Actuators["Physical Actuators<br/>• 5V Relay Module<br/>• DC Turbine Generator Motor"]
+        PLC["PLC Field Node (ESP8266)<br/>• Modbus/TCP Server (Port 502)<br/>• MQTT v3.1.1 Client (Port 1883)<br/>• Shadow UDP Listener (Port 8888)"]
+        Sensors -->|"GPIO Inputs"| PLC
+        PLC -->|"GPIO Relays"| Actuators
     end
 
     subgraph L2["Level 2: Supervisory Control & Data Acquisition (SCADA)"]
@@ -40,11 +40,11 @@ graph TD
         Playbooks["NIST SP 800-82 Incident Response Playbooks<br/>• IR-PB-001 (Safety Interlock Breach)<br/>• IR-PB-002 (Setpoint Tampering)<br/>• IR-PB-003 (Out-of-Band Sabotage)"]
     end
 
-    PLC <-->|Modbus/TCP: FC01-FC06 (Port 502)| HMI
-    PLC <-->|MQTT: plant/telemetry & plant/commands| HMI
-    HMI -.->|Passive Packet Tap / SPAN| Sensor
-    PLC -.->|Port 502 & Port 8888 Tap| Sensor
-    Sensor -->|Normalized JSON / Syslog UDP 514| Wazuh
+    PLC <-->|"Modbus/TCP: FC01-FC06 (Port 502)"| HMI
+    PLC <-->|"MQTT: plant/telemetry and plant/commands"| HMI
+    HMI -.->|"Passive Packet Tap"| Sensor
+    PLC -.->|"Port 502 and Port 8888 Tap"| Sensor
+    Sensor -->|"Normalized JSON / Syslog UDP 514"| Wazuh
     Wazuh --- Playbooks
 ```
 
@@ -217,19 +217,6 @@ ICS-Laboratory/
 ├── attack.html                         # IT/OT Cross-Boundary Web Trigger Demo
 └── requirements.txt                    # Python Dependencies
 ```
-
----
-
-## 💼 Resume & Portfolio Impact
-
-This project demonstrates advanced cross-disciplinary competency across **Operational Technology (OT)**, **Industrial Control Systems (ICS)**, and **Enterprise SOC / Detection Engineering**:
-
-* **Engineered a converged Purdue Model Level 0–4 ICS testbed** combining physical ESP8266 microcontrollers, telemetry sensors, and actuation relays running **Modbus/TCP (Port 502)** and **MQTT v3.1.1 (Port 1883)**.
-* **Implemented an industrial Modbus register memory map** (Coils `00001-00002`, Discrete Inputs `10001-10002`, Input Registers `30001-30004`, Holding Register `40001`) with function code execution (FC 01–06).
-* **Simulated 9 real-world industrial cyberattack vectors** grounded in landmark ICS incidents (**TRITON/TRISIS**, **Stuxnet**, **Oldsmar Water Treatment**, **Industroyer**, and **Aurora**).
-* **Developed an agentless passive OT Network Security Monitoring (NSM) sensor** performing zero-impact process variable correlation to detect physical safety interlock breaches and setpoint manipulation.
-* **Authored custom Wazuh SIEM decoders and detection rules** mapped to MITRE ATT&CK for ICS (T0888, T0836, T0855, T0859, T0814, T0815) with automated JSON/Syslog ingestion.
-* **Formulated NIST SP 800-82 aligned OT Incident Response playbooks** detailing triage, physical LOTO containment, and firmware secure-by-design remediation.
 
 ---
 
